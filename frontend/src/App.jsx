@@ -65,17 +65,26 @@ export default function App() {
   const handleDispatch = async () => {
     if (!taskMessage.trim() || loading) return;
     setLoading(true);
-
-    setLogs((prev) => [...prev, toLog('send', `Dispatch -> ${selectedName}: ${taskMessage}`)]);
+    const sentLog = { level: 'send', text: `Dispatch -> ${selectedName}: ${taskMessage}`, time: new Date().toLocaleTimeString() };
+    const waitLog = { level: 'waiting', text: `等待 ${selectedName} 执行中...`, time: new Date().toLocaleTimeString() };
+    setLogs((prev) => [...prev, sentLog, waitLog]);
 
     try {
-      await axios.post('/api/dispatch', {
+      const res = await axios.post('/api/dispatch', {
         target: selectedAgent,
         message: taskMessage,
       });
-      setLogs((prev) => [...prev, toLog('ok', `Ack <- ${selectedName}: 任务已接收并排队执行`)]);
-    } catch {
-      setLogs((prev) => [...prev, toLog('error', `NACK <- ${selectedName}: 通信失败或目标离线`)]);
+      const result = res.data.result || res.data.error || '执行完成（无输出）';
+      setLogs((prev) => {
+        const filtered = prev.filter((l) => l !== waitLog);
+        return [...filtered, { level: 'ok', text: `响应 <- ${selectedName}: ${result}`, time: new Date().toLocaleTimeString() }];
+      });
+    } catch (err) {
+      const msg = err.response?.data?.error || '通信失败或目标离线';
+      setLogs((prev) => {
+        const filtered = prev.filter((l) => l !== waitLog);
+        return [...filtered, { level: 'error', text: `错误 <- ${selectedName}: ${msg}`, time: new Date().toLocaleTimeString() }];
+      });
     }
 
     setTaskMessage('');
@@ -239,7 +248,9 @@ export default function App() {
                         ? 'text-rose-300'
                         : log.level === 'ok'
                           ? 'text-emerald-300'
-                          : 'text-cyan-200'
+                          : log.level === 'waiting'
+                            ? 'text-amber-300 animate-pulse'
+                            : 'text-cyan-200'
                     }`}
                   >
                     <span className="mr-2 text-slate-500">[{log.time}]</span>
