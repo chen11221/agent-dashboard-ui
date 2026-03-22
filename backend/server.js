@@ -11,6 +11,7 @@ app.use(cors());
 app.use(express.json());
 
 const scoresPath = path.join(__dirname, 'scores.json');
+const logsPath = path.join(__dirname, 'logs.json');
 const defaultScores = {
   candy: { score: 100, history: [] },
   panda: { score: 100, history: [] },
@@ -18,6 +19,7 @@ const defaultScores = {
   apple: { score: 100, history: [] },
   codex: { score: 100, history: [] },
 };
+const defaultLogs = [];
 
 function loadScores() {
   if (!fs.existsSync(scoresPath)) {
@@ -31,27 +33,39 @@ function saveScores(data) {
   fs.writeFileSync(scoresPath, JSON.stringify(data, null, 2));
 }
 
+function loadLogs() {
+  if (!fs.existsSync(logsPath)) {
+    fs.writeFileSync(logsPath, JSON.stringify(defaultLogs, null, 2));
+    return [...defaultLogs];
+  }
+  return JSON.parse(fs.readFileSync(logsPath, 'utf-8'));
+}
+
+function saveLogs(data) {
+  fs.writeFileSync(logsPath, JSON.stringify(data, null, 2));
+}
+
 // 团队成员信息配置
 const agents = {
-  candy: { 
+  candy: {
     name: '糖果 🍬', status: 'offline', role: 'Coder / Git 管理员',
     cmd: (msg) => `openclaw --profile coder agent --agent main --message "${msg}"`
   },
-  panda: { 
+  panda: {
     name: '熊猫 🐼', status: 'offline', role: '调研与文档分析员',
     cmd: (msg) => `openclaw gateway call agent --url ws://127.0.0.1:18790 --token 1322b66337c046d7db0c1ddfa02996987a5181d6f5a0e011 --params '{"to": "agent:main:main", "message": "${msg}", "idempotencyKey": "${crypto.randomUUID()}"}' --expect-final --timeout 60000`
   },
-  banana: { 
+  banana: {
     name: '香蕉 🍌', status: 'offline', role: '质量保证与安全守卫',
     cmd: (msg) => `openclaw gateway call agent --url ws://127.0.0.1:18892 --token ad925de81f8b80458eccd2d34e5af4b4664168e7af4432f5 --params '{"to": "agent:main:main", "message": "${msg}", "idempotencyKey": "${crypto.randomUUID()}"}' --expect-final --timeout 60000`
   },
-  apple: { 
+  apple: {
     name: '苹果 🍎', status: 'offline', role: 'UI 与前端工程师',
     cmd: (msg) => `openclaw gateway call agent --url ws://127.0.0.1:18899 --token aedfdc31fcb72b9cf35d3b0bbb9edfaffb44d02107fa90d4 --params '{"to": "agent:main:main", "message": "${msg}", "idempotencyKey": "${crypto.randomUUID()}"}' --expect-final --timeout 60000`
   },
-  codex: { 
+  codex: {
     name: 'Codex 💻', status: 'online', role: '复杂代码架构师',
-    cmd: (msg) => `echo "Codex 需要在 Git 环境中运行: codex exec \\"${msg}\\""` 
+    cmd: (msg) => `echo "Codex 需要在 Git 环境中运行: codex exec \\"${msg}\\""`
   }
 };
 
@@ -109,6 +123,25 @@ app.get('/api/scores', (req, res) => {
   res.json({ success: true, data: result });
 });
 
+app.get('/api/logs', (req, res) => {
+  const logs = loadLogs();
+  res.json({ success: true, data: logs });
+});
+
+app.post('/api/logs', (req, res) => {
+  const { level, text, time } = req.body || {};
+  if (!level || !text || !time) {
+    return res.status(400).json({ success: false, error: '日志字段不完整' });
+  }
+
+  const logs = loadLogs();
+  logs.push({ level, text, time });
+  const recentLogs = logs.slice(-100);
+  saveLogs(recentLogs);
+
+  res.json({ success: true, data: recentLogs });
+});
+
 app.post('/api/scores/confirm', (req, res) => {
   const { target, delta, reason } = req.body;
   const scores = loadScores();
@@ -125,7 +158,7 @@ app.post('/api/scores/confirm', (req, res) => {
 app.post('/api/dispatch', (req, res) => {
   const { target, message } = req.body;
   const agent = agents[target];
-  
+
   if (!agent) {
     return res.status(404).json({ success: false, error: '未找到该智能体' });
   }

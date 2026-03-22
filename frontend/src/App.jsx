@@ -46,10 +46,11 @@ export default function App() {
 
   useEffect(() => {
     const fetchAll = () => {
-      Promise.all([axios.get('/api/status'), axios.get('/api/scores')])
-        .then(([statusRes, scoresRes]) => {
+      Promise.all([axios.get('/api/status'), axios.get('/api/scores'), axios.get('/api/logs')])
+        .then(([statusRes, scoresRes, logsRes]) => {
           setAgents(statusRes.data.data);
           setScores(scoresRes.data.data);
+          setLogs(Array.isArray(logsRes.data.data) ? logsRes.data.data : []);
         })
         .catch(() => {
           setLogs((prev) => [...prev, toLog('error', '状态同步失败')]);
@@ -67,12 +68,18 @@ export default function App() {
 
   const selectedName = agents[selectedAgent]?.name || '目标智能体';
 
+  const appendLog = (log) => {
+    setLogs((prev) => [...prev, log]);
+    axios.post('/api/logs', log).catch(() => {});
+  };
+
   const handleDispatch = async () => {
     if (!taskMessage.trim() || loading) return;
     setLoading(true);
     const sentLog = { level: 'send', text: `Dispatch -> ${selectedName}: ${taskMessage}`, time: new Date().toLocaleTimeString() };
     const waitLog = { level: 'waiting', text: `等待 ${selectedName} 执行中...`, time: new Date().toLocaleTimeString() };
-    setLogs((prev) => [...prev, sentLog, waitLog]);
+    appendLog(sentLog);
+    appendLog(waitLog);
 
     try {
       const res = await axios.post('/api/dispatch', {
@@ -89,16 +96,10 @@ export default function App() {
         task: taskMessage,
       });
       setShowScoreModal(true);
-      setLogs((prev) => {
-        const filtered = prev.filter((l) => l !== waitLog);
-        return [...filtered, { level: 'ok', text: `响应 <- ${selectedName}: ${result || '执行完成（无输出）'}`, time: new Date().toLocaleTimeString() }];
-      });
+      appendLog({ level: 'ok', text: `响应 <- ${selectedName}: ${result || '执行完成（无输出）'}`, time: new Date().toLocaleTimeString() });
     } catch (err) {
       const msg = err.response?.data?.error || '通信失败或目标离线';
-      setLogs((prev) => {
-        const filtered = prev.filter((l) => l !== waitLog);
-        return [...filtered, { level: 'error', text: `错误 <- ${selectedName}: ${msg}`, time: new Date().toLocaleTimeString() }];
-      });
+      appendLog({ level: 'error', text: `错误 <- ${selectedName}: ${msg}`, time: new Date().toLocaleTimeString() });
     }
 
     setTaskMessage('');
