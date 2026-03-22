@@ -3,10 +3,33 @@ const cors = require('cors');
 const { exec } = require('child_process');
 const crypto = require('crypto');
 const net = require('net');
+const fs = require('fs');
+const path = require('path');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+const scoresPath = path.join(__dirname, 'scores.json');
+const defaultScores = {
+  candy: { score: 100, history: [] },
+  panda: { score: 100, history: [] },
+  banana: { score: 100, history: [] },
+  apple: { score: 100, history: [] },
+  codex: { score: 100, history: [] },
+};
+
+function loadScores() {
+  if (!fs.existsSync(scoresPath)) {
+    fs.writeFileSync(scoresPath, JSON.stringify(defaultScores, null, 2));
+    return { ...defaultScores };
+  }
+  return JSON.parse(fs.readFileSync(scoresPath, 'utf-8'));
+}
+
+function saveScores(data) {
+  fs.writeFileSync(scoresPath, JSON.stringify(data, null, 2));
+}
 
 // 团队成员信息配置
 const agents = {
@@ -77,6 +100,28 @@ app.get('/api/status', (req, res) => {
   res.json({ success: true, data: statusData });
 });
 
+app.get('/api/scores', (req, res) => {
+  const scores = loadScores();
+  const result = {};
+  Object.keys(scores).forEach((k) => {
+    result[k] = { name: agents[k].name, score: scores[k].score, history: scores[k].history };
+  });
+  res.json({ success: true, data: result });
+});
+
+app.post('/api/scores/confirm', (req, res) => {
+  const { target, delta, reason } = req.body;
+  const scores = loadScores();
+  if (!scores[target]) return res.status(404).json({ success: false, error: '未找到该智能体' });
+
+  scores[target].score = Math.max(0, scores[target].score + delta);
+  scores[target].history.unshift({ delta, reason, time: new Date().toLocaleTimeString() });
+  if (scores[target].history.length > 20) scores[target].history = scores[target].history.slice(0, 20);
+
+  saveScores(scores);
+  res.json({ success: true, score: scores[target].score });
+});
+
 app.post('/api/dispatch', (req, res) => {
   const { target, message } = req.body;
   const agent = agents[target];
@@ -88,12 +133,51 @@ app.post('/api/dispatch', (req, res) => {
   const command = agent.cmd(message.replace(/"/g, '\\"'));
   console.log(`[Dispatch] 正在向 ${agent.name} 发送任务...`);
 
-  exec(command, (error, stdout, stderr) => {
+  const startTime = Date.now();
+  exec(command, { timeout: 55000 }, (error, stdout, stderr) => {
     if (error) {
-      console.error(`[Error] ${target}:`, error);
-      return res.status(500).json({ success: false, error: stderr || error.message });
+      console.error(`[Error] ${target}:`, error.message);
     }
-    res.json({ success: true, message: `任务已送达 ${agent.name}`, result: stdout });
+
+    const duration = (Date.now() - startTime) / 1000;
+    const exitCode = error ? error.code : 0;
+    const outputLen = (stdout || '').length;
+
+    let refDelta = 0;
+    let reason = '';
+
+    if (exitCode === 0) {
+      refDelta += 10;
+      reason = '执行成功 +10；';
+    } else {
+      refDelta -= 20;
+      reason = '执行失败 -20；';
+    }
+
+    if (duration < 10) {
+      refDelta += 5;
+      reason += '速度<10s +5；';
+    } else if (duration < 30) {
+      refDelta += 2;
+      reason += '速度<30s +2；';
+    }
+
+    if (outputLen >= 50) {
+      refDelta += 5;
+      reason += '回复≥50字 +5';
+    } else if (outputLen >= 20) {
+      refDelta += 2;
+      reason += '回复≥20字 +2';
+    }
+
+    const fallbackResult = stderr || error?.message || '(无输出)';
+    res.json({
+      success: true,
+      message: `任务已送达 ${agent.name}`,
+      result: stdout || fallbackResult,
+      referenceScore: refDelta,
+      scoreDetails: { duration: parseFloat(duration.toFixed(1)), outputLen, reason },
+    });
   });
 });
 

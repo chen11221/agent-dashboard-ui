@@ -1,0 +1,22 @@
+{
+  "candy": {
+    "score": 100,
+    "history": []
+  },
+  "panda": {
+    "score": 100,
+    "history": []
+  },
+  "banana": {
+    "score": 100,
+    "history": []
+  },
+  "apple": {
+    "score": 100,
+    "history": []
+  },
+  "codex": {
+    "score": 100,
+    "history": []
+  }
+}

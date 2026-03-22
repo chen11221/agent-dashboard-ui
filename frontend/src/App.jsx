@@ -36,22 +36,27 @@ const toLog = (level, text) => ({
 
 export default function App() {
   const [agents, setAgents] = useState({});
+  const [scores, setScores] = useState({});
   const [selectedAgent, setSelectedAgent] = useState('candy');
   const [taskMessage, setTaskMessage] = useState('');
   const [logs, setLogs] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [showScoreModal, setShowScoreModal] = useState(false);
+  const [pendingScore, setPendingScore] = useState(null);
 
   useEffect(() => {
-    const fetchStatus = () => {
-      axios
-        .get('/api/status')
-        .then((res) => setAgents(res.data.data))
+    const fetchAll = () => {
+      Promise.all([axios.get('/api/status'), axios.get('/api/scores')])
+        .then(([statusRes, scoresRes]) => {
+          setAgents(statusRes.data.data);
+          setScores(scoresRes.data.data);
+        })
         .catch(() => {
-          setLogs((prev) => [...prev, toLog('error', '状态同步失败，无法连接主控网关')]);
+          setLogs((prev) => [...prev, toLog('error', '状态同步失败')]);
         });
     };
-    fetchStatus();
-    const interval = setInterval(fetchStatus, 3000);
+    fetchAll();
+    const interval = setInterval(fetchAll, 3000);
     return () => clearInterval(interval);
   }, []);
 
@@ -74,10 +79,19 @@ export default function App() {
         target: selectedAgent,
         message: taskMessage,
       });
-      const result = res.data.result || res.data.error || '执行完成（无输出）';
+      const { referenceScore, scoreDetails, result } = res.data;
+      setPendingScore({
+        target: selectedAgent,
+        agentName: selectedName,
+        referenceScore,
+        scoreDetails,
+        result,
+        task: taskMessage,
+      });
+      setShowScoreModal(true);
       setLogs((prev) => {
         const filtered = prev.filter((l) => l !== waitLog);
-        return [...filtered, { level: 'ok', text: `响应 <- ${selectedName}: ${result}`, time: new Date().toLocaleTimeString() }];
+        return [...filtered, { level: 'ok', text: `响应 <- ${selectedName}: ${result || '执行完成（无输出）'}`, time: new Date().toLocaleTimeString() }];
       });
     } catch (err) {
       const msg = err.response?.data?.error || '通信失败或目标离线';
@@ -226,42 +240,111 @@ export default function App() {
             </div>
           </div>
 
-          <div className={`${panelBase} p-5 md:p-6`}>
-            <div className="mb-4 flex items-center justify-between">
-              <h3 className="flex items-center gap-2 text-lg font-semibold text-indigo-200">
-                <Database size={18} /> 日志控制台
-              </h3>
-              <span className="rounded-md border border-slate-700 bg-slate-900/80 px-2 py-1 font-mono text-[11px] text-slate-400">
-                stream::{logs.length}
-              </span>
+          <div className="space-y-4">
+            <div className={`${panelBase} p-5 md:p-6`}>
+              <div className="mb-4 flex items-center justify-between">
+                <h3 className="flex items-center gap-2 text-lg font-semibold text-indigo-200">
+                  <Database size={18} /> 日志控制台
+                </h3>
+                <span className="rounded-md border border-slate-700 bg-slate-900/80 px-2 py-1 font-mono text-[11px] text-slate-400">
+                  stream::{logs.length}
+                </span>
+              </div>
+
+              <div className="h-[360px] overflow-y-auto rounded-xl border border-slate-700/80 bg-[#020617]/95 p-3 font-mono text-[12px] leading-6 md:h-[410px]">
+                {logs.length === 0 ? (
+                  <div className="text-slate-500">[SYS] 暂无通信记录，等待任务下发...</div>
+                ) : (
+                  logs.map((log, i) => (
+                    <div
+                      key={`${log.time}-${i}`}
+                      className={`border-b border-slate-800/70 py-1 last:border-b-0 ${
+                        log.level === 'error'
+                          ? 'text-rose-300'
+                          : log.level === 'ok'
+                            ? 'text-emerald-300'
+                            : log.level === 'waiting'
+                              ? 'text-amber-300 animate-pulse'
+                              : 'text-cyan-200'
+                      }`}
+                    >
+                      <span className="mr-2 text-slate-500">[{log.time}]</span>
+                      {log.text}
+                    </div>
+                  ))
+                )}
+              </div>
             </div>
 
-            <div className="h-[360px] overflow-y-auto rounded-xl border border-slate-700/80 bg-[#020617]/95 p-3 font-mono text-[12px] leading-6 md:h-[410px]">
-              {logs.length === 0 ? (
-                <div className="text-slate-500">[SYS] 暂无通信记录，等待任务下发...</div>
-              ) : (
-                logs.map((log, i) => (
-                  <div
-                    key={`${log.time}-${i}`}
-                    className={`border-b border-slate-800/70 py-1 last:border-b-0 ${
-                      log.level === 'error'
-                        ? 'text-rose-300'
-                        : log.level === 'ok'
-                          ? 'text-emerald-300'
-                          : log.level === 'waiting'
-                            ? 'text-amber-300 animate-pulse'
-                            : 'text-cyan-200'
-                    }`}
-                  >
-                    <span className="mr-2 text-slate-500">[{log.time}]</span>
-                    {log.text}
-                  </div>
-                ))
-              )}
+            <div className={`${panelBase} p-4`}>
+              <h3 className="mb-3 flex items-center gap-2 text-lg font-semibold text-amber-200">
+                <Cpu size={18} /> 🏆 绩效积分榜
+              </h3>
+              <div className="space-y-2">
+                {Object.entries(scores)
+                  .sort((a, b) => b[1].score - a[1].score)
+                  .map(([id, s]) => (
+                    <div key={id} className="flex items-center justify-between rounded-lg bg-slate-800/60 px-3 py-2">
+                      <span className="font-medium text-slate-200">{s.name}</span>
+                      <span className={`font-mono text-sm font-bold ${s.score >= 100 ? 'text-emerald-300' : 'text-rose-300'}`}>
+                        {s.score} pts
+                      </span>
+                    </div>
+                  ))}
+              </div>
             </div>
           </div>
         </section>
       </main>
+
+      {showScoreModal && pendingScore && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div className="w-full max-w-md rounded-2xl border border-cyan-400/30 bg-slate-900 p-6 shadow-2xl">
+            <h2 className="mb-4 text-xl font-bold text-cyan-200">🏆 任务评分确认</h2>
+            <div className="mb-3 space-y-1 rounded-lg bg-slate-800 p-3 text-sm text-slate-300">
+              <div>执行智能体：<span className="text-cyan-300">{pendingScore.agentName}</span></div>
+              <div className="truncate text-slate-400">任务：{pendingScore.task}</div>
+              <div className="truncate text-emerald-300">结果：{String(pendingScore.result || '').slice(0, 100)}</div>
+            </div>
+            <div className="mb-4 rounded-lg border border-amber-400/30 bg-amber-900/20 p-3">
+              <div className="mb-1 text-amber-300">
+                📊 系统参考分：<span className="text-2xl font-bold">{`+${pendingScore.referenceScore}`}</span>
+              </div>
+              <div className="text-xs text-amber-200/70">{pendingScore.scoreDetails?.reason}</div>
+              <div className="text-xs text-slate-400">
+                耗时：{pendingScore.scoreDetails?.duration}s · 字数：{pendingScore.scoreDetails?.outputLen}
+              </div>
+            </div>
+            <div className="flex gap-3">
+              <button
+                onClick={async () => {
+                  await axios.post('/api/scores/confirm', {
+                    target: pendingScore.target,
+                    delta: pendingScore.referenceScore,
+                    reason: pendingScore.scoreDetails?.reason,
+                  });
+                  setShowScoreModal(false);
+                  setPendingScore(null);
+                  const sr = await axios.get('/api/scores');
+                  setScores(sr.data.data);
+                }}
+                className="flex-1 rounded-xl bg-cyan-500/30 py-2 font-semibold text-cyan-100 hover:bg-cyan-500/50"
+              >
+                确认评分
+              </button>
+              <button
+                onClick={() => {
+                  setShowScoreModal(false);
+                  setPendingScore(null);
+                }}
+                className="flex-1 rounded-xl border border-slate-600 py-2 text-slate-400 hover:bg-slate-800"
+              >
+                忽略
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
