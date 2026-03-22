@@ -1,1 +1,22 @@
 🚀 Agent API running on http://localhost:3001
+[Dispatch] 正在向 糖果 🍬 发送任务...
+[Error] candy: Command failed: openclaw --profile coder agent --agent main --message "你好"
+gateway connect failed: GatewayClientRequestError: unauthorized: gateway token mismatch (set gateway.remote.token to match gateway.auth.token)
+Gateway agent failed; falling back to embedded: Error: gateway closed (1008): unauthorized: gateway token mismatch (set gateway.remote.token to match gateway.auth.token)
+Gateway target: ws://127.0.0.1:18789
+Source: local loopback
+Config: /home/chen/.openclaw-coder/openclaw.json
+Bind: loopback
+[agent/embedded] embedded run agent end: runId=96c910ee-3783-45a5-bb71-bc0aeaf30c25 isError=true model=gemini-3-flash-preview provider=google error=⚠️ API rate limit reached. Please try again later.
+[agent/embedded] embedded run agent end: runId=96c910ee-3783-45a5-bb71-bc0aeaf30c25 isError=true model=gemini-3-flash-preview provider=google error=⚠️ API rate limit reached. Please try again later.
+[agent/embedded] embedded run agent end: runId=96c910ee-3783-45a5-bb71-bc0aeaf30c25 isError=true model=gemini-3-flash-preview provider=google error=⚠️ API rate limit reached. Please try again later.
+[agent/embedded] embedded run agent end: runId=96c910ee-3783-45a5-bb71-bc0aeaf30c25 isError=true model=gemini-3-flash-preview provider=google error=⚠️ API rate limit reached. Please try again later.
+[agent/embedded] auth profile failure state updated: runId=96c910ee-3783-45a5-bb71-bc0aeaf30c25 profile=sha256:a94403a4f9d0 provider=google reason=rate_limit window=cooldown reused=false
+[agent/embedded] embedded run failover decision: runId=96c910ee-3783-45a5-bb71-bc0aeaf30c25 stage=assistant decision=fallback_model reason=rate_limit provider=google/gemini-3-flash-preview profile=sha256:a94403a4f9d0
+[diagnostic] lane task error: lane=main durationMs=19133 error="FailoverError: ⚠️ API rate limit reached. Please try again later."
+[diagnostic] lane task error: lane=session:agent:main:main durationMs=19136 error="FailoverError: ⚠️ API rate limit reached. Please try again later."
+[model-fallback/decision] model fallback decision: decision=candidate_failed requested=google/gemini-3-flash-preview candidate=google/gemini-3-flash-preview reason=rate_limit next=none
+FailoverError: ⚠️ API rate limit reached. Please try again later.
+
+[Dispatch] 正在向 糖果 🍬 发送任务...
+[Dispatch] 正在向 Codex 💻 发送任务...
