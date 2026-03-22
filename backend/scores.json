@@ -1,22 +1,67 @@
 {
   "candy": {
-    "score": 100,
-    "history": []
+    "score": 140,
+    "history": [
+      {
+        "delta": 20,
+        "reason": "执行成功 +10；速度<10s +5；回复≥50字 +5",
+        "time": "12:14:12 PM"
+      },
+      {
+        "delta": 20,
+        "reason": "执行成功 +10；速度<10s +5；回复≥50字 +5",
+        "time": "11:34:58 AM"
+      }
+    ]
   },
   "panda": {
-    "score": 100,
-    "history": []
+    "score": 117,
+    "history": [
+      {
+        "delta": 17,
+        "reason": "执行成功 +10；速度<30s +2；回复≥50字 +5",
+        "time": "11:35:34 AM"
+      }
+    ]
   },
   "banana": {
-    "score": 100,
-    "history": []
+    "score": 120,
+    "history": [
+      {
+        "delta": 20,
+        "reason": "执行成功 +10；速度<10s +5；回复≥50字 +5",
+        "time": "11:36:11 AM"
+      }
+    ]
   },
   "apple": {
-    "score": 100,
-    "history": []
+    "score": 120,
+    "history": [
+      {
+        "delta": 20,
+        "reason": "执行成功 +10；速度<10s +5；回复≥50字 +5",
+        "time": "11:36:00 AM"
+      }
+    ]
   },
   "codex": {
-    "score": 100,
-    "history": []
+    "score": 152,
+    "history": [
+      {
+        "delta": 15,
+        "reason": "执行成功 +10；速度<10s +5；",
+        "time": "12:13:39 PM"
+      },
+      {
+        "delta": 17,
+        "reason": "执行成功 +10；速度<10s +5；回复≥20字 +2",
+        "time": "12:01:44 PM"
+      },
+      {
+        "delta": 20,
+        "reason": "执行成功 +10；速度<10s +5；回复≥50字 +5",
+        "time": "11:35:47 AM"
+      }
+    ]
   }
 }

@@ -34,31 +34,139 @@ const toLog = (level, text) => ({
   time: new Date().toLocaleTimeString(),
 });
 
+const normalizeLogEntry = (log) => {
+  if (!log || typeof log !== 'object') return log;
+  if (log.level !== 'ok' || typeof log.text !== 'string') return log;
+  const prefix = '响应 <- ';
+  if (!log.text.startsWith(prefix)) return log;
+  const idx = log.text.indexOf(':');
+  if (idx === -1 || idx >= log.text.length - 1) return log;
+  return { ...log, text: log.text.slice(idx + 1).trim() };
+};
+
+const getLogKey = (log) => `${log?.time || ''}|${log?.level || ''}|${log?.text || ''}|${log?.id || ''}`;
+
 export default function App() {
   const [agents, setAgents] = useState({});
   const [scores, setScores] = useState({});
   const [selectedAgent, setSelectedAgent] = useState('candy');
   const [taskMessage, setTaskMessage] = useState('');
   const [logs, setLogs] = useState([]);
+  const [groupMessages, setGroupMessages] = useState([]);
+  const [groupInput, setGroupInput] = useState('');
+  const [groupSending, setGroupSending] = useState(false);
   const [loading, setLoading] = useState(false);
   const [showScoreModal, setShowScoreModal] = useState(false);
   const [pendingScore, setPendingScore] = useState(null);
+  const [activeMenu, setActiveMenu] = useState('operations');
 
   useEffect(() => {
-    const fetchAll = () => {
-      Promise.all([axios.get('/api/status'), axios.get('/api/scores'), axios.get('/api/logs')])
-        .then(([statusRes, scoresRes, logsRes]) => {
-          setAgents(statusRes.data.data);
-          setScores(scoresRes.data.data);
-          setLogs(Array.isArray(logsRes.data.data) ? logsRes.data.data : []);
+    const fetchStatus = () => {
+      axios
+        .get('/api/status')
+        .then((ret) => {
+          setAgents(ret?.data?.data || {});
         })
         .catch(() => {
           setLogs((prev) => [...prev, toLog('error', '状态同步失败')]);
         });
     };
-    fetchAll();
-    const interval = setInterval(fetchAll, 3000);
-    return () => clearInterval(interval);
+
+    const fetchInit = () => {
+      Promise.allSettled([
+        axios.get('/api/status'),
+        axios.get('/api/scores'),
+        axios.get('/api/logs'),
+        axios.get('/api/group-chat/messages'),
+      ]).then(([statusRet, scoresRet, logsRet, groupRet]) => {
+        if (statusRet.status === 'fulfilled') {
+          setAgents(statusRet.value?.data?.data || {});
+        }
+
+        if (scoresRet.status === 'fulfilled') {
+          setScores(scoresRet.value?.data?.data || {});
+        }
+
+        if (logsRet.status === 'fulfilled') {
+          const remoteLogs = logsRet.value?.data?.data;
+          const normalizedRemote = Array.isArray(remoteLogs)
+            ? remoteLogs.map(normalizeLogEntry).filter((log) => log && log.level !== 'waiting')
+            : [];
+          setLogs(normalizedRemote);
+        }
+
+        if (groupRet.status === 'fulfilled') {
+          const remoteMessages = groupRet.value?.data?.data;
+          setGroupMessages(Array.isArray(remoteMessages) ? remoteMessages : []);
+        }
+
+        if (
+          statusRet.status === 'rejected' ||
+          scoresRet.status === 'rejected' ||
+          logsRet.status === 'rejected' ||
+          groupRet.status === 'rejected'
+        ) {
+          setLogs((prev) => [...prev, toLog('error', '部分状态同步失败')]);
+        }
+      });
+    };
+
+    fetchInit();
+    const statusInterval = setInterval(fetchStatus, 5000);
+    const eventSource = new EventSource('/api/stream');
+
+    eventSource.addEventListener('scores', (event) => {
+      try {
+        const scoresData = JSON.parse(event.data);
+        setScores(scoresData && typeof scoresData === 'object' ? scoresData : {});
+      } catch {
+        // ignore malformed SSE payload
+      }
+    });
+
+    eventSource.addEventListener('logs', (event) => {
+      try {
+        const remoteLogs = JSON.parse(event.data);
+        const normalizedRemote = Array.isArray(remoteLogs)
+          ? remoteLogs.map(normalizeLogEntry).filter((log) => log && log.level !== 'waiting')
+          : [];
+        setLogs((prev) => {
+          const waitingLogs = prev.filter((log) => log && log.level === 'waiting');
+          const merged = [...normalizedRemote, ...waitingLogs];
+          const deduped = [];
+          const seen = new Set();
+
+          merged.forEach((log) => {
+            const key = getLogKey(log);
+            if (seen.has(key)) return;
+            seen.add(key);
+            deduped.push(log);
+          });
+
+          return deduped;
+        });
+      } catch {
+        // ignore malformed SSE payload
+      }
+    });
+
+    eventSource.addEventListener('group-chat', (event) => {
+      try {
+        const messages = JSON.parse(event.data);
+        setGroupMessages(Array.isArray(messages) ? messages : []);
+      } catch {
+        // ignore malformed SSE payload
+      }
+    });
+
+    eventSource.onerror = () => {
+      // EventSource reconnects automatically.
+    };
+
+    return () => {
+      clearInterval(statusInterval);
+      eventSource.close();
+    };
   }, []);
 
   const onlineCount = useMemo(
@@ -68,24 +176,62 @@ export default function App() {
 
   const selectedName = agents[selectedAgent]?.name || '目标智能体';
 
-  const appendLog = (log) => {
+  const appendLog = (log, options = {}) => {
+    const { persist = true } = options;
     setLogs((prev) => [...prev, log]);
-    axios.post('/api/logs', log).catch(() => {});
+    if (persist) {
+      axios.post('/api/logs', log).catch(() => {});
+    }
+  };
+
+  const removeLogById = (id) => {
+    setLogs((prev) => prev.filter((log) => log.id !== id));
+  };
+
+  const handleClearLogs = async () => {
+    if (logs.length === 0) return;
+    const confirmed = window.confirm('确认清空所有日志记录吗？');
+    if (!confirmed) return;
+
+    try {
+      let res;
+      try {
+        res = await axios.delete('/api/logs');
+      } catch (err) {
+        if (err.response?.status === 404) {
+          res = await axios.post('/api/logs/clear');
+        } else {
+          throw err;
+        }
+      }
+      if (!res.data?.success) {
+        throw new Error(res.data?.error || '清空日志失败');
+      }
+      setLogs([]);
+    } catch (err) {
+      const msg = err.response?.data?.error || err.message || '清空日志失败';
+      appendLog({ level: 'error', text: `清空日志失败: ${msg}`, time: new Date().toLocaleTimeString() });
+    }
   };
 
   const handleDispatch = async () => {
     if (!taskMessage.trim() || loading) return;
     setLoading(true);
+    const waitingId = `waiting-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const sentLog = { level: 'send', text: `Dispatch -> ${selectedName}: ${taskMessage}`, time: new Date().toLocaleTimeString() };
-    const waitLog = { level: 'waiting', text: `等待 ${selectedName} 执行中...`, time: new Date().toLocaleTimeString() };
+    const waitLog = { id: waitingId, level: 'waiting', text: `等待 ${selectedName} 执行中...`, time: new Date().toLocaleTimeString() };
     appendLog(sentLog);
-    appendLog(waitLog);
+    appendLog(waitLog, { persist: false });
 
     try {
       const res = await axios.post('/api/dispatch', {
         target: selectedAgent,
         message: taskMessage,
       });
+      removeLogById(waitingId);
+      if (!res.data?.success) {
+        throw new Error(res.data?.error || '任务发送失败');
+      }
       const { referenceScore, scoreDetails, result } = res.data;
       setPendingScore({
         target: selectedAgent,
@@ -96,14 +242,51 @@ export default function App() {
         task: taskMessage,
       });
       setShowScoreModal(true);
-      appendLog({ level: 'ok', text: `响应 <- ${selectedName}: ${result || '执行完成（无输出）'}`, time: new Date().toLocaleTimeString() });
+      appendLog({ level: 'ok', text: result || '执行完成（无输出）', time: new Date().toLocaleTimeString() });
     } catch (err) {
+      removeLogById(waitingId);
       const msg = err.response?.data?.error || '通信失败或目标离线';
       appendLog({ level: 'error', text: `错误 <- ${selectedName}: ${msg}`, time: new Date().toLocaleTimeString() });
     }
 
     setTaskMessage('');
     setLoading(false);
+  };
+
+  const handleGroupSend = async () => {
+    const text = groupInput.trim();
+    if (!text || groupSending) return;
+    setGroupSending(true);
+
+    try {
+      const res = await axios.post('/api/group-chat/messages', { text });
+      if (!res.data?.success) {
+        throw new Error(res.data?.error || '群聊发送失败');
+      }
+      const incoming = Array.isArray(res.data?.data) ? res.data.data : [];
+      setGroupMessages((prev) => [...prev, ...incoming].slice(-200));
+      setGroupInput('');
+    } catch (err) {
+      const msg = err.response?.data?.error || err.message || '群聊发送失败';
+      appendLog({ level: 'error', text: `群聊错误: ${msg}`, time: new Date().toLocaleTimeString() });
+    } finally {
+      setGroupSending(false);
+    }
+  };
+
+  const handleClearGroupMessages = async () => {
+    const confirmed = window.confirm('确认清空群聊记录吗？');
+    if (!confirmed) return;
+    try {
+      const res = await axios.post('/api/group-chat/clear');
+      if (!res.data?.success) {
+        throw new Error(res.data?.error || '清空群聊失败');
+      }
+      setGroupMessages([]);
+    } catch (err) {
+      const msg = err.response?.data?.error || err.message || '清空群聊失败';
+      appendLog({ level: 'error', text: `清空群聊失败: ${msg}`, time: new Date().toLocaleTimeString() });
+    }
   };
 
   return (
@@ -152,150 +335,265 @@ export default function App() {
           </div>
         </header>
 
-        <section className="mb-6 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-5">
-          {Object.entries(agents).map(([id, agent]) => {
-            const isOnline = agent.status === 'online';
-            const isSelected = selectedAgent === id;
-
-            return (
+        <section className={`${panelBase} mb-6 p-3`}>
+          <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
+            {[
+              { id: 'overview', label: '总览' },
+              { id: 'operations', label: '任务与日志' },
+              { id: 'group', label: '群聊' },
+              { id: 'scores', label: '积分榜' },
+            ].map((item) => (
               <button
-                key={id}
-                onClick={() => setSelectedAgent(id)}
-                className={`group relative overflow-hidden rounded-2xl border p-4 text-left transition-all duration-300 ${
-                  isSelected
-                    ? 'border-cyan-300/70 bg-cyan-500/10 shadow-[0_0_35px_rgba(34,211,238,0.28)]'
-                    : 'border-slate-700/80 bg-slate-900/60 hover:border-cyan-400/50 hover:bg-slate-900/90'
+                key={item.id}
+                onClick={() => setActiveMenu(item.id)}
+                className={`rounded-lg border px-3 py-2 text-sm font-medium transition ${
+                  activeMenu === item.id
+                    ? 'border-cyan-300/60 bg-cyan-500/20 text-cyan-100'
+                    : 'border-slate-700/80 bg-slate-900/60 text-slate-300 hover:border-cyan-400/40'
                 }`}
               >
-                <div className="absolute right-0 top-0 h-24 w-24 translate-x-10 -translate-y-10 rounded-full bg-cyan-400/10 blur-2xl" />
-                <div className="relative">
-                  <div className="mb-4 flex items-start justify-between">
-                    <div className="rounded-xl border border-slate-700/80 bg-slate-950/90 p-2.5">{icons[id] || <Bot size={22} />}</div>
-                    <span
-                      className={`inline-flex items-center gap-1 rounded-full border px-2 py-1 text-[11px] font-medium ${
-                        isOnline
-                          ? 'border-emerald-400/40 bg-emerald-500/15 text-emerald-300'
-                          : 'border-rose-400/40 bg-rose-500/15 text-rose-300'
-                      }`}
-                    >
-                      <CircleDashed size={12} className={isOnline ? 'animate-spin [animation-duration:2.6s]' : ''} />
-                      {isOnline ? 'ONLINE' : 'OFFLINE'}
-                    </span>
-                  </div>
-
-                  <h2 className="text-lg font-semibold text-slate-100">{agent.name}</h2>
-                  <p className="mt-1 flex items-center gap-1.5 text-xs text-slate-400">
-                    <Activity size={13} /> {agent.role}
-                  </p>
-                  <div className="mt-4 flex items-center justify-between border-t border-slate-700/70 pt-3 text-xs text-slate-400">
-                    <span className="font-mono">ID: {id}</span>
-                    <span className="inline-flex items-center gap-1 text-cyan-300/90">
-                      LOCK
-                      <ChevronRight size={13} className="transition-transform group-hover:translate-x-0.5" />
-                    </span>
-                  </div>
-                </div>
+                {item.label}
               </button>
-            );
-          })}
+            ))}
+          </div>
         </section>
 
-        <section className="grid grid-cols-1 gap-6 xl:grid-cols-3">
-          <div className={`${panelBase} xl:col-span-2 p-5 md:p-6`}>
-            <div className="mb-4 flex items-center justify-between">
-              <h3 className="flex items-center gap-2 text-lg font-semibold text-cyan-200">
-                <Send size={18} /> 任务下发控制台
-              </h3>
-              <span className="rounded-full border border-slate-700 bg-slate-900/80 px-2.5 py-1 font-mono text-[11px] text-slate-300">
-                target::{selectedName}
-              </span>
+        {(activeMenu === 'overview' || activeMenu === 'operations') && (
+          <section className="mb-6 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-5">
+            {Object.entries(agents).map(([id, agent]) => {
+              const isOnline = agent.status === 'online';
+              const isSelected = selectedAgent === id;
+
+              return (
+                <button
+                  key={id}
+                  onClick={() => setSelectedAgent(id)}
+                  className={`group relative overflow-hidden rounded-2xl border p-4 text-left transition-all duration-300 ${
+                    isSelected
+                      ? 'border-cyan-300/70 bg-cyan-500/10 shadow-[0_0_35px_rgba(34,211,238,0.28)]'
+                      : 'border-slate-700/80 bg-slate-900/60 hover:border-cyan-400/50 hover:bg-slate-900/90'
+                  }`}
+                >
+                  <div className="absolute right-0 top-0 h-24 w-24 translate-x-10 -translate-y-10 rounded-full bg-cyan-400/10 blur-2xl" />
+                  <div className="relative">
+                    <div className="mb-4 flex items-start justify-between">
+                      <div className="rounded-xl border border-slate-700/80 bg-slate-950/90 p-2.5">{icons[id] || <Bot size={22} />}</div>
+                      <span
+                        className={`inline-flex items-center gap-1 rounded-full border px-2 py-1 text-[11px] font-medium ${
+                          isOnline
+                            ? 'border-emerald-400/40 bg-emerald-500/15 text-emerald-300'
+                            : 'border-rose-400/40 bg-rose-500/15 text-rose-300'
+                        }`}
+                      >
+                        <CircleDashed size={12} className={isOnline ? 'animate-spin [animation-duration:2.6s]' : ''} />
+                        {isOnline ? 'ONLINE' : 'OFFLINE'}
+                      </span>
+                    </div>
+
+                    <h2 className="text-lg font-semibold text-slate-100">{agent.name}</h2>
+                    <p className="mt-1 flex items-center gap-1.5 text-xs text-slate-400">
+                      <Activity size={13} /> {agent.role}
+                    </p>
+                    <div className="mt-4 flex items-center justify-between border-t border-slate-700/70 pt-3 text-xs text-slate-400">
+                      <span className="font-mono">ID: {id}</span>
+                      <span className="inline-flex items-center gap-1 text-cyan-300/90">
+                        LOCK
+                        <ChevronRight size={13} className="transition-transform group-hover:translate-x-0.5" />
+                      </span>
+                    </div>
+                  </div>
+                </button>
+              );
+            })}
+          </section>
+        )}
+
+        {activeMenu === 'overview' && (
+          <section className={`${panelBase} mb-6 p-5 md:p-6`}>
+            <h3 className="mb-3 text-lg font-semibold text-cyan-200">系统总览</h3>
+            <p className="text-sm text-slate-400">通过顶部菜单切换到“任务与日志”、“群聊”或“积分榜”查看详细信息。</p>
+          </section>
+        )}
+
+        {activeMenu === 'operations' && (
+          <section className="grid grid-cols-1 gap-4 xl:grid-cols-12">
+            <div className={`${panelBase} p-4 md:p-5 xl:col-span-5`}>
+              <div className="mb-4 flex items-center justify-between">
+                <h3 className="flex items-center gap-2 text-lg font-semibold text-cyan-200">
+                  <Send size={18} /> 任务下发控制台
+                </h3>
+                <span className="rounded-full border border-slate-700 bg-slate-900/80 px-2.5 py-1 font-mono text-[11px] text-slate-300">
+                  target::{selectedName}
+                </span>
+              </div>
+
+              <div className="rounded-xl border border-slate-700/80 bg-[#030712]/95 p-3 shadow-inner shadow-cyan-900/20">
+                <div className="mb-1 flex items-center gap-2 text-xs text-slate-500">
+                  <Terminal size={14} /> dispatch-shell@lemon-main
+                </div>
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[12px] font-mono text-slate-300">
+                  <span className="text-cyan-300/90">$ attach --agent {selectedAgent}</span>
+                  <span className="text-emerald-300/90">channel: stable</span>
+                  <span className="text-slate-500">输入任务并发送</span>
+                </div>
+              </div>
+
+              <div className="mt-4 flex flex-col gap-3 md:flex-row">
+                <input
+                  type="text"
+                  value={taskMessage}
+                  onChange={(e) => setTaskMessage(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && handleDispatch()}
+                  placeholder={`输入任务并发送给 ${selectedName}`}
+                  className="h-12 flex-1 rounded-xl border border-cyan-500/30 bg-slate-900/80 px-4 font-mono text-sm text-slate-100 placeholder:text-slate-500 focus:border-cyan-300 focus:outline-none focus:ring-2 focus:ring-cyan-500/30"
+                />
+                <button
+                  onClick={handleDispatch}
+                  disabled={loading}
+                  className="h-12 rounded-xl border border-cyan-300/50 bg-cyan-500/20 px-5 font-semibold text-cyan-100 transition hover:bg-cyan-500/30 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {loading ? '发送中...' : '发送指令'}
+                </button>
+              </div>
             </div>
 
-            <div className="rounded-xl border border-slate-700/80 bg-[#030712]/95 p-4 shadow-inner shadow-cyan-900/20">
-              <div className="mb-2 flex items-center gap-2 text-xs text-slate-500">
-                <Terminal size={14} /> dispatch-shell@lemon-main
+            <div className="space-y-4 xl:col-span-7">
+              <div className={`${panelBase} p-4 md:p-5`}>
+                <div className="mb-3 flex items-center justify-between">
+                  <h3 className="flex items-center gap-2 text-lg font-semibold text-indigo-200">
+                    <Database size={18} /> 日志控制台
+                  </h3>
+                  <div className="flex items-center gap-2">
+                    <span className="rounded-md border border-slate-700 bg-slate-900/80 px-2 py-1 font-mono text-[11px] text-slate-400">
+                      stream::{logs.length}
+                    </span>
+                    <button
+                      onClick={handleClearLogs}
+                      disabled={logs.length === 0}
+                      className="rounded-md border border-rose-400/30 bg-rose-500/10 px-2 py-1 text-[11px] font-medium text-rose-200 transition hover:bg-rose-500/20 disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      清空日志
+                    </button>
+                  </div>
+                </div>
+
+                <div className="h-[460px] overflow-y-auto rounded-xl border border-slate-700/80 bg-[#020617]/95 p-3 font-mono text-[12px] leading-6 md:h-[560px] xl:h-[620px]">
+                  {logs.length === 0 ? (
+                    <div className="text-slate-500">[SYS] 暂无通信记录，等待任务下发...</div>
+                  ) : (
+                    logs.map((log, i) => (
+                      <div
+                        key={`${log.time}-${i}`}
+                        className={`border-b border-slate-800/70 py-1 last:border-b-0 ${
+                          log.level === 'error'
+                            ? 'text-rose-300'
+                            : log.level === 'ok'
+                              ? 'text-emerald-300'
+                              : log.level === 'waiting'
+                                ? 'text-amber-300 animate-pulse'
+                                : 'text-cyan-200'
+                        }`}
+                      >
+                        <span className="mr-2 text-slate-500">[{log.time}]</span>
+                        {log.text}
+                      </div>
+                    ))
+                  )}
+                </div>
               </div>
-              <div className="text-[13px] font-mono leading-6 text-slate-300">
-                <div className="mb-2 text-cyan-300/90">$ attach --agent {selectedAgent}</div>
-                <div className="mb-2 text-emerald-300/90">channel status: stable</div>
-                <div className="text-slate-500">请输入任务指令并发送至目标智能体。</div>
+
+              <div className={`${panelBase} p-4`}>
+                <h3 className="mb-2 flex items-center gap-2 text-lg font-semibold text-amber-200">
+                  <Cpu size={18} /> 🏆 绩效积分榜
+                </h3>
+                <div className="max-h-40 space-y-2 overflow-y-auto pr-1">
+                  {Object.entries(scores)
+                    .sort((a, b) => b[1].score - a[1].score)
+                    .map(([id, s]) => (
+                      <div key={id} className="flex items-center justify-between rounded-lg bg-slate-800/60 px-3 py-2">
+                        <span className="font-medium text-slate-200">{s.name}</span>
+                        <span className={`font-mono text-sm font-bold ${s.score >= 100 ? 'text-emerald-300' : 'text-rose-300'}`}>
+                          {s.score} pts
+                        </span>
+                      </div>
+                    ))}
+                </div>
               </div>
+            </div>
+          </section>
+        )}
+
+        {activeMenu === 'scores' && (
+          <section className={`${panelBase} p-5 md:p-6`}>
+            <h3 className="mb-4 flex items-center gap-2 text-lg font-semibold text-amber-200">
+              <Cpu size={18} /> 全量积分榜
+            </h3>
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+              {Object.entries(scores)
+                .sort((a, b) => b[1].score - a[1].score)
+                .map(([id, s]) => (
+                  <div key={id} className="rounded-xl border border-slate-700/80 bg-slate-900/60 p-4">
+                    <div className="mb-2 flex items-center justify-between">
+                      <span className="font-semibold text-slate-100">{s.name}</span>
+                      <span className={`font-mono text-sm font-bold ${s.score >= 100 ? 'text-emerald-300' : 'text-rose-300'}`}>
+                        {s.score} pts
+                      </span>
+                    </div>
+                    <p className="text-xs text-slate-500">agent::{id}</p>
+                  </div>
+                ))}
+            </div>
+          </section>
+        )}
+
+        {activeMenu === 'group' && (
+          <section className={`${panelBase} mt-6 p-5 md:p-6`}>
+            <div className="mb-4 flex items-center justify-between">
+              <h3 className="flex items-center gap-2 text-lg font-semibold text-cyan-200">
+                <Bot size={18} /> 群聊聊天室
+              </h3>
+              <button
+                onClick={handleClearGroupMessages}
+                disabled={groupMessages.length === 0}
+                className="rounded-md border border-rose-400/30 bg-rose-500/10 px-2 py-1 text-[11px] font-medium text-rose-200 transition hover:bg-rose-500/20 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                清空群聊
+              </button>
+            </div>
+
+            <div className="h-72 overflow-y-auto rounded-xl border border-slate-700/80 bg-[#020617]/95 p-3 font-mono text-[12px] leading-6">
+              {groupMessages.length === 0 ? (
+                <div className="text-slate-500">[ROOM] 暂无群聊消息，发送一条消息开始。</div>
+              ) : (
+                groupMessages.map((msg) => (
+                  <div key={msg.id || `${msg.time}-${msg.sender}-${msg.text}`} className="border-b border-slate-800/70 py-1 last:border-b-0 text-cyan-100">
+                    <span className="mr-2 text-slate-500">[{msg.time}]</span>
+                    <span className="mr-2 text-cyan-300">{msg.sender}:</span>
+                    <span>{msg.text}</span>
+                  </div>
+                ))
+              )}
             </div>
 
             <div className="mt-4 flex flex-col gap-3 md:flex-row">
               <input
                 type="text"
-                value={taskMessage}
-                onChange={(e) => setTaskMessage(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && handleDispatch()}
-                placeholder={`输入任务并发送给 ${selectedName}`}
+                value={groupInput}
+                onChange={(e) => setGroupInput(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleGroupSend()}
+                placeholder="输入群聊消息；可用 @糖果 @熊猫 @香蕉 @苹果 @Codex 点名"
                 className="h-12 flex-1 rounded-xl border border-cyan-500/30 bg-slate-900/80 px-4 font-mono text-sm text-slate-100 placeholder:text-slate-500 focus:border-cyan-300 focus:outline-none focus:ring-2 focus:ring-cyan-500/30"
               />
               <button
-                onClick={handleDispatch}
-                disabled={loading}
+                onClick={handleGroupSend}
+                disabled={groupSending}
                 className="h-12 rounded-xl border border-cyan-300/50 bg-cyan-500/20 px-5 font-semibold text-cyan-100 transition hover:bg-cyan-500/30 disabled:cursor-not-allowed disabled:opacity-50"
               >
-                {loading ? '发送中...' : '发送指令'}
+                {groupSending ? '群聊发送中...' : '发送到群聊'}
               </button>
             </div>
-          </div>
-
-          <div className="space-y-4">
-            <div className={`${panelBase} p-5 md:p-6`}>
-              <div className="mb-4 flex items-center justify-between">
-                <h3 className="flex items-center gap-2 text-lg font-semibold text-indigo-200">
-                  <Database size={18} /> 日志控制台
-                </h3>
-                <span className="rounded-md border border-slate-700 bg-slate-900/80 px-2 py-1 font-mono text-[11px] text-slate-400">
-                  stream::{logs.length}
-                </span>
-              </div>
-
-              <div className="h-[360px] overflow-y-auto rounded-xl border border-slate-700/80 bg-[#020617]/95 p-3 font-mono text-[12px] leading-6 md:h-[410px]">
-                {logs.length === 0 ? (
-                  <div className="text-slate-500">[SYS] 暂无通信记录，等待任务下发...</div>
-                ) : (
-                  logs.map((log, i) => (
-                    <div
-                      key={`${log.time}-${i}`}
-                      className={`border-b border-slate-800/70 py-1 last:border-b-0 ${
-                        log.level === 'error'
-                          ? 'text-rose-300'
-                          : log.level === 'ok'
-                            ? 'text-emerald-300'
-                            : log.level === 'waiting'
-                              ? 'text-amber-300 animate-pulse'
-                              : 'text-cyan-200'
-                      }`}
-                    >
-                      <span className="mr-2 text-slate-500">[{log.time}]</span>
-                      {log.text}
-                    </div>
-                  ))
-                )}
-              </div>
-            </div>
-
-            <div className={`${panelBase} p-4`}>
-              <h3 className="mb-3 flex items-center gap-2 text-lg font-semibold text-amber-200">
-                <Cpu size={18} /> 🏆 绩效积分榜
-              </h3>
-              <div className="space-y-2">
-                {Object.entries(scores)
-                  .sort((a, b) => b[1].score - a[1].score)
-                  .map(([id, s]) => (
-                    <div key={id} className="flex items-center justify-between rounded-lg bg-slate-800/60 px-3 py-2">
-                      <span className="font-medium text-slate-200">{s.name}</span>
-                      <span className={`font-mono text-sm font-bold ${s.score >= 100 ? 'text-emerald-300' : 'text-rose-300'}`}>
-                        {s.score} pts
-                      </span>
-                    </div>
-                  ))}
-              </div>
-            </div>
-          </div>
-        </section>
+          </section>
+        )}
       </main>
 
       {showScoreModal && pendingScore && (
@@ -319,15 +617,23 @@ export default function App() {
             <div className="flex gap-3">
               <button
                 onClick={async () => {
-                  await axios.post('/api/scores/confirm', {
-                    target: pendingScore.target,
-                    delta: pendingScore.referenceScore,
-                    reason: pendingScore.scoreDetails?.reason,
-                  });
-                  setShowScoreModal(false);
-                  setPendingScore(null);
-                  const sr = await axios.get('/api/scores');
-                  setScores(sr.data.data);
+                  try {
+                    const confirmRes = await axios.post('/api/scores/confirm', {
+                      target: pendingScore.target,
+                      delta: pendingScore.referenceScore,
+                      reason: pendingScore.scoreDetails?.reason,
+                    });
+                    if (!confirmRes.data?.success) {
+                      throw new Error(confirmRes.data?.error || '确认评分失败');
+                    }
+                    setShowScoreModal(false);
+                    setPendingScore(null);
+                    const sr = await axios.get('/api/scores');
+                    setScores(sr.data.data);
+                  } catch (err) {
+                    const msg = err.response?.data?.error || err.message || '确认评分失败';
+                    appendLog({ level: 'error', text: `评分确认失败: ${msg}`, time: new Date().toLocaleTimeString() });
+                  }
                 }}
                 className="flex-1 rounded-xl bg-cyan-500/30 py-2 font-semibold text-cyan-100 hover:bg-cyan-500/50"
               >
